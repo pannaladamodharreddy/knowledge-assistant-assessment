@@ -54,7 +54,10 @@ Run that from the assessment kit folder. The assessment data is not included in 
 
 ## Results
 
-On the public evaluation set it scored 0.787 in my last run. The weak spots are listed honestly in `NOTES.md`.
+On the 40-question public evaluation set it scored 0.8236 in my latest run: accuracy 0.82, consistency 1.0
+(reworded and repeated questions give identical answers), speed 1.0 (median 0.1 seconds per answer), and no
+stale-value traps hit. Ingesting all five snapshots takes about 40 to 50 seconds. The weakest areas are conflict
+resolution and list questions. The weak spots are listed honestly in `NOTES.md`.
 
 ## Known limits
 
