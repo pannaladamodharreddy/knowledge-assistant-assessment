@@ -244,7 +244,7 @@ def parse_page(md: str):
                     labelcells = [c for c in cells if c and not re.search(r"\d+(\.\d+)?\s*%|^\$?\s*[\d,.]+$", c)]
                     label = norm_numbers(" ".join(labelcells[:2]))
                     vals = tuple(re.findall(r"\d+(?:\.\d+)?%", " ".join(cells)))
-                    out.append(("row", ctx, disp, "|".join(cells), label, vals, eff))
+                    out.append(("row", ctx, disp, tuple(zip(hdr, cells)), label, vals, eff))
             continue
         s = ln.strip()
         if not s:
@@ -297,6 +297,7 @@ class KS:
         self._cache = {}
         self._conf = None
         self._ptoks = {}
+        self.seqs = {}
 
     # ------------------------------ ingest
     def ingest(self, snapshot):
@@ -307,6 +308,7 @@ class KS:
             self.page_snaps[p.url].add(idx)
             a = authority(p.url)
             title = clean(p.title or "")
+            order = []
             for kind, ctx, disp, raw, label, vals, eff in parse_page(p.markdown):
                 key = (p.url, disp, ctx)
                 cid = self.by_key.get(key)
@@ -317,6 +319,8 @@ class KS:
                     self.chunks.append(ch)
                     self.by_key[key] = cid
                 self.chunks[cid].snaps.add(idx)
+                order.append(cid)
+            self.seqs[(p.url, idx)] = order
             hd = ""
             for line in p.markdown.split("\n"):
                 hm = re.match(r"^#{1,6}\s+(.*)", line)
@@ -359,6 +363,9 @@ class KS:
         self.N = max(1, len(self.chunks))
         self.avglen = total / self.N if self.N else 1.0
         self.df = {t: len(v) for t, v in self.inv.items()}
+        self.seq = {}
+        for ch in self.chunks:
+            pass
         self.keyidx = defaultdict(list)
         for ch in self.chunks:
             if ch.kind == "row" and ch.label:
@@ -518,6 +525,8 @@ class KS:
         self._build()
         if not self.snaps:
             return Answer(text="I don't know. Please contact us for details.", confident=False)
+        if as_of and str(as_of)[:10] < self.snaps[0][1][:10]:
+            return self._refuse()
         si = self.snap_for(as_of)
         key = (question, si)
         if key in self._cache:
@@ -590,6 +599,7 @@ class KS:
         top_s, top_id = res[0]
         top = self.chunks[top_id]
         qset = set(uq)
+        topset = set(top.toks)
         wtot = sum(self.idf(t) for t in qset) or 1.0
         minauth = 0.6 if want_rate else 0.0
         unseen = [t for t in qset if not self._live_has(t, si, minauth)]
@@ -603,6 +613,10 @@ class KS:
             return self._refuse()
         if not self._feature_ok(ql, self.chunks[top_id].display):
             return self._refuse()
+        if want_rate:
+            tcov = sum(self.idf(t) for t in qset if t in topset) / wtot
+            if tcov < 0.5:
+                return self._refuse()
 
         want_list = bool(re.search(
             r"\b(all|list|options|what (?:credit )?cards|rates for|rates\b|certificates?|hours|offer|which)\b", ql))
@@ -616,6 +630,8 @@ class KS:
                 break
             if top.kind == "row" and ch.kind != "row":
                 continue
+            if top.kind == "text" and not want_list and ch.url != top.url:
+                continue
             if top.kind == "row" and ch.url != top.url and top.auth > ch.auth and self._same_fact(top, ch):
                 continue
             if ch.display in [self.chunks[p].display for p in picked]:
@@ -626,6 +642,8 @@ class KS:
                 continue
             picked.append(cid)
         picked = self._supersede(picked)
+        if top.kind == "text" and not want_rate:
+            picked = self._extend(picked, si)
 
         if want_rate:
             if not re.search(r"\d+(?:\.\d+)?\s*%", self.chunks[picked[0]].display):
@@ -690,6 +708,23 @@ class KS:
                 keep.append(picked[i])
         return keep
 
+    def _extend(self, picked, si):
+        top = self.chunks[picked[0]]
+        seq = self.seqs.get((top.url, si), [])
+        try:
+            pos = seq.index(picked[0])
+        except ValueError:
+            return picked
+        out = list(picked)
+        total = len(top.display)
+        for cid in seq[pos + 1: pos + 5]:
+            ch = self.chunks[cid]
+            if ch.kind != "text" or total + len(ch.display) > 420 or cid in out:
+                break
+            out.append(cid)
+            total += len(ch.display)
+        return out
+
     def _link_answer(self, question, si):
         uq, res = self.retrieve(question, si, want_link=True)
         if not res:
@@ -701,8 +736,145 @@ class KS:
                       sources=[Source(url=url, snapshot_id=self.snaps[si][0], quote=ch.display[:100])])
 
     # ------------------------------ conflicts
+    NUM_COL = re.compile(r"rate|apr|apy|yield|dividend|fee|amount|price|minimum|min\.", re.I)
+    SKIP_COL = re.compile(r"payment|points|example|term$|balance|min\. to|minimum to", re.I)
+
+    @staticmethod
+    def _num(v):
+        m = re.search(r"(\$)?\s*(\d[\d,]*(?:\.\d+)?)\s*(%)?", v or "")
+        if not m:
+            return None
+        return (("$" if m.group(1) else "%" if m.group(3) else ""), round(float(m.group(2).replace(",", "")), 4))
+
     def conflicts(self):
-        return []
+        if self._conf is not None:
+            return self._conf
+        self._build()
+        last = len(self.snaps) - 1
+        obs = defaultdict(list)     # (label, biz, col) -> [(chunk, valstr, num)]
+        for ch in self.chunks:
+            if ch.kind != "row" or not ch.label or not re.search(r"[a-z]{3}", ch.label) or ch.auth < 0.4:
+                continue
+            for hh, cc in ch.raw:
+                hn = re.sub(r"[^a-z ]", "", (hh or "").lower()).strip()
+                if not hn or self.SKIP_COL.search(hn) or not self.NUM_COL.search(hn):
+                    continue
+                if not re.search(r"\d\s*%|\$", cc or ""):
+                    continue
+                num = self._num(cc)
+                if num is None:
+                    continue
+                col = "apy" if "yield" in hn or "apy" in hn else ("apr" if "apr" in hn or "annual percentage rate" in hn else "rate")
+                obs[(self._fkey(ch)[0], self._fkey(ch)[1], col)].append((ch, cc.strip(), num))
+        within, history = [], []
+        for key, lst in obs.items():
+            nums = {o[2] for o in lst}
+            if len(nums) < 2:
+                continue
+            # live per snapshot
+            bysnap = defaultdict(set)
+            for ch, v, n in lst:
+                for si in ch.snaps:
+                    bysnap[si].add(n)
+            same_snap = any(len(v) > 1 for v in bysnap.values())
+            ever_last = bysnap.get(last, set())
+            entry = (key, lst, same_snap)
+            (within if same_snap else history).append(entry)
+        out = []
+        # one conflict per labelled fact: prefer apy, then rate, then apr
+        pri = {"apy": 0, "rate": 1, "apr": 2}
+        best = {}
+        for kind, group in (("within", within), ("history", history)):
+            for entry in group:
+                k2 = (entry[0][0], entry[0][1])
+                cur = best.get(k2)
+                rk = (0 if kind == "within" else 1, pri[entry[0][2]], entry[0][2])
+                if cur is None or rk < cur[0]:
+                    best[k2] = (rk, kind, entry)
+        for k2 in sorted(best):
+            _, kind, (key, lst, same) = best[k2]
+            if True:
+                c = self._mk_conflict(key, lst, kind, last)
+                if c:
+                    out.append(c)
+        out.sort(key=lambda x: (x[0], x[1], x[2].topic))
+        prose = self._prose_conflicts()
+        self._conf = (prose + [c for _, _, c in out])[:80]
+        return self._conf
+
+    COUNT_RE = re.compile(r"\b(\d{1,3}(?:,\d{3})*)\+?\s+(?:[a-z]+\s+)?(branch(?:es)?(?: office)?(?: locations?)?|counties)\b", re.I)
+
+    def _prose_conflicts(self):
+        last = len(self.snaps) - 1
+        by = defaultdict(lambda: defaultdict(list))
+        for ch in self.chunks:
+            if ch.kind != "text" or last not in ch.snaps or ch.auth < 0.3:
+                continue
+            for m in self.COUNT_RE.finditer(ch.raw):
+                noun = "branch" if m.group(2).lower().startswith("branch") else "counties"
+                by[noun][m.group(1).replace(",", "")].append(ch)
+        out = []
+        for noun, d in sorted(by.items()):
+            if len(d) < 2:
+                continue
+            def score(v):
+                chs = d[v]
+                return (len(chs), max(c.auth for c in chs), v)
+            win = max(d, key=score)
+            vals = [win] + [v for v in sorted(d, key=lambda v: (-len(d[v]), v)) if v != win][:2]
+            srcs = []
+            for v in vals:
+                c0 = sorted(d[v], key=lambda c: (-c.auth, c.url))[0]
+                srcs.append(Source(url=c0.url, snapshot_id=self.snaps[last][0], quote=c0.display[:140]))
+            out.append(Conflict(topic="number of %s (Dupaco branch count)" % noun, values=vals, sources=srcs, resolution=win,
+                                reason="most pages in the newest snapshot agree on %s; other figures come from older or narrower copy" % win))
+        return out
+
+    def _mk_conflict(self, key, lst, kind, last):
+        label, biz, col = key
+        # winner: observations live in the latest snapshot where the fact appears
+        latest_present = max(max(ch.snaps) for ch, _, _ in lst)
+        live = [(ch, v, n) for ch, v, n in lst if latest_present in ch.snaps]
+        pool = live or lst
+        win = max(pool, key=lambda o: (o[0].auth, o[0].eff, max(o[0].snaps), -len(o[1]), o[1]))
+        vals = []
+        for ch, v, n in sorted(lst, key=lambda o: (-o[0].auth, -max(o[0].snaps), o[1])):
+            mm = re.search(r"\$?\s*\d[\d,]*(?:\.\d+)?\s*%?", v)
+            vv = re.sub(r"\s+", "", mm.group(0)) if mm else re.sub(r"\s+", "", v)
+            if vv not in vals:
+                vals.append(vv)
+        if len(vals) < 2:
+            return None
+        vals = vals[:4]
+        mm = re.search(r"\$?\s*\d[\d,]*(?:\.\d+)?\s*%?", win[1])
+        wv = re.sub(r"\s+", "", mm.group(0)) if mm else re.sub(r"\s+", "", win[1])
+        if wv not in vals:
+            vals[-1] = wv
+        srcs, seen = [], set()
+        for ch, v, n in sorted(lst, key=lambda o: (-o[0].auth, -max(o[0].snaps), o[0].url)):
+            if (ch.url, v) in seen:
+                continue
+            seen.add((ch.url, v))
+            srcs.append(Source(url=ch.url, snapshot_id=self.snaps[max(ch.snaps)][0], quote=ch.display[:140]))
+            if len(srcs) >= 4:
+                break
+        wch = win[0]
+        if kind == "within":
+            reason = ("same labelled fact shows different values in snapshot %s; kept the value from the page with the "
+                      "highest authority (%s), then newest effective date" % (self.snaps[latest_present][1], self._rank_name(wch.url)))
+        else:
+            reason = ("value changed between snapshots; kept the newest value from %s in snapshot %s"
+                      % (self._rank_name(wch.url), self.snaps[latest_present][1]))
+        topic = "%s %s %s%s" % (label, col, "(business) " if biz else "", "")
+        topic = re.sub(r"\s+", " ", topic).strip()
+        rank = (0 if kind == "within" else 1, -min(o[0].auth for o in lst) * 0 - max(o[0].auth for o in lst))
+        return (rank[0], rank[1], Conflict(topic=topic, values=vals, sources=srcs, resolution=wv, reason=reason))
+
+    @staticmethod
+    def _rank_name(url):
+        a = authority(url)
+        return ("official rate sheet" if a >= 1.0 else "product page" if a >= 0.9 else "site page" if a >= 0.6
+                else "landing/promo or calculator page" if a >= 0.25 else "low-authority page")
 
 
 def build():
