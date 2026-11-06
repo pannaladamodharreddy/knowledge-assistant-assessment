@@ -819,7 +819,7 @@ class KS:
                 continue
             def score(v):
                 chs = d[v]
-                return (len(chs), max(c.auth for c in chs), v)
+                return (len({c.url for c in chs}), max(c.auth for c in chs), v)
             win = max(d, key=score)
             vals = [win] + [v for v in sorted(d, key=lambda v: (-len(d[v]), v)) if v != win][:2]
             srcs = []
@@ -827,7 +827,7 @@ class KS:
                 c0 = sorted(d[v], key=lambda c: (-c.auth, c.url))[0]
                 srcs.append(Source(url=c0.url, snapshot_id=self.snaps[last][0], quote=c0.display[:140]))
             out.append(Conflict(topic="number of %s (Dupaco branch count)" % noun, values=vals, sources=srcs, resolution=win,
-                                reason="most pages in the newest snapshot agree on %s; other figures come from older or narrower copy" % win))
+                                reason="most pages in the newest snapshot state %s; other figures come from older or narrower copy" % win))
         return out
 
     def _mk_conflict(self, key, lst, kind, last):
