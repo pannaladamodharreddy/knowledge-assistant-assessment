@@ -33,7 +33,7 @@ except Exception:  # pragma: no cover
 STOP = set("""a an the of to in on for and or is are was were be been do does did can could would should will
 i me my we our you your us it its this that these those with at by from as about any what which who whom how
 when where why there here have has had not no than then so if into out up down over under per tell give get
-please know like need want just also me link url use see does doe many much repeat tell right now currently current""".split())
+please know like need want just also me link url use see does doe many much repeat tell right now currently current provide show find looking""".split())
 
 SYN = {
     "cd": "certificate", "cds": "certificate", "certificates": "certificate",
@@ -42,7 +42,7 @@ SYN = {
     "apy": "apy", "apr": "apr",
     "cards": "card", "branches": "branch", "locations": "branch", "location": "branch",
     "phone": "phone", "number": "number",
-    "hours": "hour", "open": "hour", "opens": "hour", "eligible": "join", "eligibility": "join", "wallet": "wallet", "wallets": "wallet",
+    "hours": "hour", "open": "hour", "opens": "hour", "vehicle": "auto", "vehicles": "auto", "car": "auto", "cars": "auto", "automobile": "auto", "financed": "loan", "financing": "loan", "finance": "loan", "office": "branch", "offices": "branch", "employer": "employee", "eligibility": "eligible", "wallet": "wallet", "wallets": "wallet",
 }
 
 LINK_RE = re.compile(r"!\[[^\]]*\]\([^)]*\)")
@@ -222,7 +222,9 @@ def parse_page(md: str):
                     rows.append(cells)
             # effective date from following lines
             eff = ""
-            for j in range(i, min(i + 6, n)):
+            for j in range(i, min(i + 14, n)):
+                if lines[j].startswith(("|", "#")):
+                    break
                 m = re.search(r"effective (?:as of|on)?\s*(\d{1,2})/(\d{1,2})/(\d{2,4})", lines[j], re.I)
                 if m:
                     y = int(m.group(3))
@@ -345,6 +347,7 @@ class KS:
         self.dirty = True
         self._cache = {}
         self._conf = None
+        self._build()
 
     def _build(self):
         if not self.dirty:
@@ -390,7 +393,7 @@ class KS:
         return best
 
     # ------------------------------ retrieval
-    def retrieve(self, question, si, want_link=False, topn=80):
+    def retrieve(self, question, si, want_link=False, topn=80, limit=None):
         ql = question.lower()
         qt = tokens(question)
         uq = []
@@ -409,6 +412,8 @@ class KS:
                     continue
                 if (ch.kind == "link") != want_link:
                     continue
+                if limit and (ch.kind != "row" or not ch.eff or ch.eff > limit):
+                    continue
                 f = ch.tf[t]
                 scores[cid] += w * f * (k1 + 1) / (f + k1 * (1 - b + b * ch.length / self.avglen))
         cand = sorted(scores.items(), key=lambda x: (-x[1], x[0]))[:250]
@@ -422,7 +427,10 @@ class KS:
         f_phone = bool(re.search(r"phone|call|telephone|contact", ql))
         f_hours = bool(re.search(r"hour|open|clos|lobby|drive", ql))
         f_count = bool(re.search(r"how many|number of|count", ql))
-        mcnt = re.search(r"how many ([a-z]+)", ql)
+        qterms = set(re.findall(r"(\d+)(month|year)", norm_numbers(question)))
+        list_q = bool(re.search(r"\b(can i|which|options|types|services|available|accept|eligible|who can|what are)\b", ql))
+        plural_q = bool(re.search(r"\b(cards|all|every|each|list|accounts|loans)\b", ql))
+        mcnt = re.search(r"(?:how many|number of) (?:dupaco )?([a-z]+)", ql)
         cnt_noun = (stem(mcnt.group(1))[:6] if mcnt else "")
         f_addr = bool(re.search(r"address|located|location of", ql))
         f_when = bool(re.search(r"\bwhen\b|what date|which year|last year", ql))
@@ -442,7 +450,7 @@ class KS:
                 adj *= 1.5
             if f_hours and re.search(r"\b\d{1,2}(:\d\d)?\s*[ap]\.?m", d, re.I):
                 adj *= 2.0
-            if f_count and cnt_noun and re.search(r"\b\d+\s+(?:[a-z]+\s+){0,2}" + cnt_noun, ch.raw, re.I):
+            if f_count and cnt_noun and ch.kind == "text" and re.search(r"\b\d+\s+(?:[a-z]+\s+){0,2}" + cnt_noun, ch.raw, re.I):
                 adj *= 3.0
             if f_addr and re.search(r"\b\d{5}\b", d):
                 adj *= 1.5
@@ -463,15 +471,25 @@ class KS:
             adj *= (0.2 + 0.8 * a) ** 1.5
             u = ch.url.lower()
             isbiz = self._isbiz(ch)
-            if not biz_q and isbiz:
+            if not biz_q and isbiz and not plural_q:
                 adj *= 0.6
             if biz_q and not isbiz and "/personal" in u:
                 adj *= 0.6
             if not promo_q and ch.kind == "row" and re.search(r"relief program|special|introductory|promo|bonus", ch.display + " " + ch.ctx, re.I):
                 adj *= 0.7
+            if ch.kind == "text" and re.search(r"\bmin read\b|Keep reading|\.\.\.$", ch.raw):
+                adj *= 0.5
+            if want_rate and ch.kind == "text":
+                adj *= 1.3
+            if list_q and ch.kind == "text" and len(re.findall(r"[A-Z][\w&']+(?: [A-Z][\w&']+)?(?:,| or | and )", ch.raw)) >= 2:
+                adj *= 1.8
             if ch.kind == "row":
                 if self._beaten(ch, si):
                     continue
+                if qterms:
+                    rterms = set(re.findall(r"(\d+)(month|year)", norm_numbers(ch.display.split(";")[0] + " " + ch.label)))
+                    if rterms:
+                        adj *= 2.0 if rterms & qterms else 0.25
                 adj *= 1.15 * (1.3 if want_rate else 1.0)
                 if "refinanc" in d.lower() and "refinanc" not in ql:
                     adj *= 0.7
@@ -525,13 +543,14 @@ class KS:
         self._build()
         if not self.snaps:
             return Answer(text="I don't know. Please contact us for details.", confident=False)
+        limit = None
         if as_of and str(as_of)[:10] < self.snaps[0][1][:10]:
-            return self._refuse()
+            limit = str(as_of)[:10]
         si = self.snap_for(as_of)
-        key = (question, si)
+        key = (question, si, limit)
         if key in self._cache:
             return self._cache[key]
-        ans = self._answer(question, si)
+        ans = self._answer(question, si, limit)
         self._cache[key] = ans
         return ans
 
@@ -572,14 +591,14 @@ class KS:
                 return True
         return False
 
-    def _answer(self, question, si):
+    def _answer(self, question, si, limit=None):
         ql = question.lower()
         want_rate = bool(re.search(r"\b(rate|apr|apy|interest|dividend|cost of borrowing)s?\b", ql))
         want_link = bool(re.search(r"\b(link|url|web ?address|website address|webpage|web page)\b", ql)) or bool(
             re.search(r"how (?:do|can) i (?:join|apply|sign up|enroll|open)\b.*\bonline\b", ql))
         if want_link:
             return self._link_answer(question, si)
-        uq, res = self.retrieve(question, si)
+        uq, res = self.retrieve(question, si, limit=limit)
         if not res:
             return self._refuse()
         if want_rate:
@@ -596,6 +615,10 @@ class KS:
                 filt = [(s_, c) for s_, c in res if rare in self.chunks[c].toks]
             if filt:
                 res = filt
+        res = self._dedupe_near(res)
+        okres = [(s_, c) for s_, c in res if self._feature_ok(ql, self.chunks[c].display)]
+        if okres and len(okres) < len(res):
+            res = okres + [x for x in res if x not in okres]
         top_s, top_id = res[0]
         top = self.chunks[top_id]
         qset = set(uq)
@@ -614,12 +637,18 @@ class KS:
         if not self._feature_ok(ql, self.chunks[top_id].display):
             return self._refuse()
         if want_rate:
-            tcov = sum(self.idf(t) for t in qset if t in topset) / wtot
-            if tcov < 0.5:
-                return self._refuse()
+            rare_t = [t for t in qset if self.df.get(t, 0) < 0.03 * self.N]
+            if rare_t:
+                tcov = sum(self.idf(t) for t in rare_t if t in topset) / (sum(self.idf(t) for t in rare_t) or 1.0)
+                if tcov < 0.5:
+                    return self._refuse()
 
+        v = self._value_answer(ql, res, si)
+        if v is not None:
+            return v
         want_list = bool(re.search(
             r"\b(all|list|options|what (?:credit )?cards|rates for|rates\b|certificates?|hours|offer|which)\b", ql))
+        plural_q = bool(re.search(r"\b(cards|all|every|each|list|accounts|loans)\b", ql))
         picked = [top_id]
         cutoff = 0.62 * top_s if (top.kind == "row" or want_list) else 0.78 * top_s
         for s, cid in res[1:]:
@@ -628,7 +657,7 @@ class KS:
             ch = self.chunks[cid]
             if s < cutoff:
                 break
-            if top.kind == "row" and ch.kind != "row":
+            if top.kind == "row" and ch.kind != "row" and not plural_q:
                 continue
             if top.kind == "text" and not want_list and ch.url != top.url:
                 continue
@@ -652,8 +681,8 @@ class KS:
         for cid in picked:
             ch = self.chunks[cid]
             t = ch.display
-            if ch.kind == "row" and ch.ctx:
-                t = f"{ch.ctx[:70]} - {t}"
+            if ch.kind == "row":
+                t = self._compose_row(ch, ql)
             if t in seen:
                 continue
             seen.add(t)
@@ -668,6 +697,115 @@ class KS:
                 if u not in [x.url for x in srcs]:
                     srcs.append(Source(url=u, snapshot_id=self.snaps[si][0], quote=t[:160]))
         return Answer(text=" ".join(lines), sources=srcs[:6], confident=True)
+
+    @staticmethod
+    def _suffix(url):
+        m = re.search(r"-(\d)/?$", url)
+        return int(m.group(1)) if m else 0
+
+    def _dedupe_near(self, res):
+        """Collapse near-identical passages published on several URLs ('-2', '-3' copies).
+        Identical text keeps the canonical URL; text that differs slightly keeps the newest copy."""
+        out, reps = [], []
+        for s_, c in res:
+            ch = self.chunks[c]
+            if ch.kind != "text" or len(ch.toks) < 6:
+                out.append((s_, c))
+                continue
+            ts = set(ch.toks)
+            hit = None
+            for k, (rs, rc, rts) in enumerate(reps):
+                if len(ts & rts) / float(len(ts | rts)) >= 0.8:
+                    hit = k
+                    break
+            if hit is None:
+                reps.append((s_, c, ts))
+                out.append((s_, c))
+            else:
+                rs, rc, rts = reps[hit]
+                rch = self.chunks[rc]
+                if ch.display != rch.display and self._suffix(ch.url) > self._suffix(rch.url):
+                    out = [(s2, c2) if c2 != rc else (s2, c) for s2, c2 in out]
+                    reps[hit] = (rs, c, ts)
+        return out
+
+    def _compose_row(self, ch, ql):
+        names, cols = [], []
+        for hh, cc in ch.raw:
+            if not cc:
+                continue
+            if re.search(r"\d\s*%", cc):
+                h = (hh or "").lower()
+                kind = ("apy" if re.search(r"yield|apy", h) else "apr" if re.search(r"apr|annual percentage rate", h)
+                        else "div" if "dividend" in h else "rate" if "rate" in h else "other")
+                if "point" in h or "min" in h:
+                    continue
+                cols.append((kind, hh, cc))
+            elif not re.match(r"^\$?\s*[\d,.]+$", cc) and not re.search(r"payment example", hh or "", re.I):
+                if not re.search(r"^\$?[\d,.]+\s*(or less)?$", cc) or True:
+                    names.append(cc)
+        want = set()
+        neg = re.search(r"(not|instead of|rather than|excluding) (?:the )?(apy|apr|yield|dividend)", ql)
+        if re.search(r"\bapy\b|yield", ql):
+            want.add("apy")
+        if re.search(r"\bapr\b|annual percentage rate", ql):
+            want.add("apr")
+        if re.search(r"dividend", ql):
+            want.add("div")
+        if neg:
+            ng = neg.group(2)
+            want.discard("apy" if ng in ("apy", "yield") else "apr" if ng == "apr" else "div")
+            if not want:
+                want = {"div"} if ng in ("apy", "yield") else {"apy"}
+        sel = [c for c in cols if c[0] in want] if want else cols
+        if not sel:
+            sel = cols
+        label = " ".join(names)[:110]
+        body = "; ".join(f"{re.sub(r'[0-9]+$', '', (h or 'rate').strip())} {c}" for _, h, c in sel)
+        sec = ch.ctx.split(" - ")[0][:40] if False else ""
+        return f"{label}: {body}." if body else ch.display
+
+    # value extractors
+    def _value_answer(self, ql, res, si):
+        mode = None
+        if re.search(r"routing|\baba\b", ql):
+            mode = "routing"
+        else:
+            m = re.search(r"(?:how many|number of|count of) ((?:[a-z]+ ){0,3}[a-z]+)", ql)
+            if m:
+                ws = [w for w in m.group(1).split() if w not in ("dupaco", "credit", "union", "do", "does", "are", "is", "the", "a", "total", "different")]
+                if ws:
+                    mode = "count"
+                    cnoun = ws[0]
+        if not mode:
+            return None
+        votes, who = defaultdict(float), defaultdict(list)
+        top = res[0][0] or 1.0
+        for s_, c in res[:15]:
+            ch = self.chunks[c]
+            if ch.kind != "text":
+                continue
+            if mode == "routing":
+                mm = re.finditer(r"(?:routing|aba)[^0-9]{0,60}(\d{9})\b", ch.raw, re.I)
+                for x in mm:
+                    votes[x.group(1)] += s_ / top
+                    who[x.group(1)].append(ch.url)
+            else:
+                noun = stem(cnoun)[:6]
+                for x in re.finditer(r"(?<![$\d,.])\b(\d[\d,]*)\+?\s+((?:[a-z-]+\s+){0,2}" + re.escape(noun) + r"[a-z ]{0,18}?)(?=[.,;:)]|$|\s(?:in|and|across|throughout|serving|with)\b)", ch.raw, re.I):
+                    votes[(x.group(1).replace(",", ""), x.group(2).strip())] += (s_ / top) * (3.0 if "dupaco" in ch.raw.lower() else 0.3)
+                    who[(x.group(1).replace(",", ""), x.group(2).strip())].append(ch.url)
+        if not votes:
+            return None
+        best = max(votes, key=lambda k: (round(votes[k], 6), k))
+        urls = []
+        for u in sorted(who[best], key=lambda x: (-authority(x), x)):
+            if u not in urls:
+                urls.append(u)
+        srcs = [Source(url=u, snapshot_id=self.snaps[si][0]) for u in urls[:3]]
+        if mode == "routing":
+            return Answer(text=f"Dupaco's routing number is {best}.", sources=srcs)
+        return Answer(text=f"Dupaco has {best[0]} {best[1]}.", sources=srcs)
 
     @staticmethod
     def _isbiz(ch):
@@ -812,6 +950,8 @@ class KS:
                 continue
             for m in self.COUNT_RE.finditer(ch.raw):
                 noun = "branch" if m.group(2).lower().startswith("branch") else "counties"
+                if int(m.group(1).replace(",", "")) > 400 or "dupaco" not in ch.raw.lower():
+                    continue
                 by[noun][m.group(1).replace(",", "")].append(ch)
         out = []
         for noun, d in sorted(by.items()):

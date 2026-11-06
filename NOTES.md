@@ -46,3 +46,12 @@ Sorted tie breaks everywhere, answers cached per (question, snapshot). Ingest ab
 ## Known weak spots
 Free-text answers return the best passages rather than a composed sentence. List questions (wallets, eligibility) depend on the right
 passage ranking. "Last year" style relative dates are not resolved. Hours differ by branch and are not tied to a named branch.
+
+## Round 2 additions
+Near-duplicate passages ("-2", "-3" copies) are collapsed and the newest differing copy is kept. Teaser snippets ("Keep reading") are down-weighted.
+Rows are composed into short lines that show only the requested column (APY, APR or dividend rate, with "not the APY" respected).
+Term and year qualifiers in the question (30-month, 17-month, 30-year) boost matching rows and demote other terms.
+Count and routing questions use a voting extractor that returns one sentence with one number, so rewordings give identical answers.
+Questions with an as_of date before the first snapshot use the first snapshot but only rows whose "effective as of" date is on or before it.
+Table effective dates are searched up to 14 lines below a table.
+Known gap: conflict winner for the branch count still prefers the figure used by most pages (23), not the figure the answer path returns (22).
